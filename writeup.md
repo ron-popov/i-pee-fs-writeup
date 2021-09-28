@@ -154,14 +154,15 @@ I parsing the image using Kaitai (with VFat structure), and it really helped me 
 After ditching Kaitai, i searched for a FAT16 parser **written in python** that could **extract files** from an image.
 Luckily https://github.com/nathanhi/pyfatfs stood up to my demands.
 
-### Insert FakeFile
-I used the example to initialize the parser and well, make it parse
+### Example code
+Reading a file from a FAT16 fs using pyfatps looks like this, i used this as a sample
 ```python
 import fs
 my_fs = fs.open_fs("fat://a.bin?read_only=true")
 ```
 
-But of course, i don't want it parsing it ```a.bin```, so i searched for a call to ```open``` in the source code of the library, luckily the codebase is not very big and i managed to find it quite easily at ```PyFat.py:228```
+### Using FakeFile instead of real file
+Inserting FakeFile instead of a real file was quite easy, searching for a call to ```open``` in the source code of the library didn't lead up to that much result, the relavent one is at ```PyFat.py:228ish``` (the "ish" is becuase i made a lot of changes to the code and the line number will change)
 
 ```python
 self.__set_fp(open(filename, mode=mode))
@@ -172,15 +173,42 @@ And i changed it to
 self.__set_fp(FakeFile("34.87.210.216", 1337))
 ```
 
-I Ran the example code, but some BIG read requests were made to chunks the size of 0x10000.
-I assumed it because the parser is probably trying to parse something i doesn't really need, so i begain looking at the code to understand the flow of parsing an image.
+### Interesting functions
+The functions were the most interesting were :
+* ```PyFat::open``` - initialized an image and parses the interesting stuff (headers and important sections
+* ```PyFat::_parse_fat``` - parses a lot of data at the beginning of the image, this function had some changes to reduce the number of read requests
+* ```PyFat::get_cluster_chain``` - reads a chain of clusters from the file, this function wasn't really changed but she raised quite a lot of exceptions, that had to be resolved
 
-### Removing unnecesery reads
-
+### Getting data about flag file
 ```open_fs``` calls ```open``` which opens the image file (FakeFile in our case), then calls ```parse_header```, ```_parse_fat``` and ```parse_root_dir```.
-Using some print statements i found the culprit of the huge read requests was ```_parse_fat```
 
-```_parse_fat:286``` Shown the following code :
+```_parse_fat``` took a lot of time to run so i commented it out, and somehow the parser didn't really break.
+I could get a list of files, and some metadata about them.
+I got a dirlist by printing the ```subdirs``` object inside the function ```_fat12_parse_root_dir```
+
+```
+00 literal garbage ignore, 01 lol, 03 owo whats this, 03 pfp.jpg, 04 story, 05 pkfire, 07 flag.txt, pics
+```
+
+We got a path of the flag : "07 flag.txt" ! All that's left is to understand where it's content is located and read it.
+This can be done using the code
+```python
+flag_file = my_fs.openbin("07 flag.txt")
+flag_file_cluster = flag_file.dir_entry.get_cluster() #12314
+```
+
+Reading the file is done using
+```python
+flag_file.read()
+```
+but this didn't go so well...
+Now i tried understanding why ```_parse_fat``` tried to read so much data, and how to make it read only the interesting data
+
+
+### Removing big reads
+I saw that the parser was trying to read a lot of data when initialzing, using some print statements i found the culprit of the huge read requests was ```_parse_fat```
+
+The first section of ```_parse_fat``` contains this for loop, which reads ```fat_size``` bytes (64K) * ```NumFATS``` (2), this is a lot of data to read so i changed it to only read the data relavent to the 
 
 ```python
 fats = []
@@ -193,145 +221,6 @@ for i in range(self.bpb_header["BPB_NumFATS"]):
 You are probably wondering, hmmm what is the value of ```fat_size``` -> **65536**
 Now, because each read request return 4 bytes, and we have implemented a caching mechanism, reading 65536 bytes translates to only 16384 read requests for each fat system, which we have 2 of -> 32768 read requests. **WAY TOO MUCH**
 
-I tried setting it all to null bytes just to see what happens, 
+So i changed it only read the cluster of the flag_file (12314)
 
-```python
-fats = []
-for i in range(self.bpb_header["BPB_NumFATS"]):
-    with self.__lock:
-        self.__seek(first_fat_bytes + (i * fat_size))
-        fats += [b'\x00' * fat_size]
-```
-
-That really didn't go that well :(
-```
-PyFATException: FREE_CLUSTER mark found in FAT cluster chain, cannot access file
-```
-
-How about just not calling ```_parse_fat``` ? I commented the call to ```_parse_fat```, and surpirisingly, didn't get any errors :D
-I tried interacting with ```my_fs``` and find any interesting function i can call, but failed :(
-I looked into ```parse_root_dir``` because it sound interesting and maybe it could atleast give us an path, it calls ```_fat12_parse_root_dir``` based on the FS Type (FAT16), the function parses the structure of the directories, i would love to find the dir structure but i wonder if it can do that without parsing fat...
-
-I added a ```print(subdirs)``` before the for loop
-```python
-print(subdirs)
-for dir_entry in subdirs:
-	self.root_dir.add_subdirectory(dir_entry)
-```
-
-And surprisingly, running the example code got me a dirlist !
-```
-00 literal garbage ignore, 01 lol, 03 owo whats this, 03 pfp.jpg, 04 story, 05 pkfire, 07 flag.txt, pics
-```
-
-We got a path of the flag : "07 flag.txt" ! All that's left is to understand where it's content is located and read it.
-I tried reading it using this code 
-```python
-flag_file = my_fs.openbin("07 flag.txt")
-flag_file.read()
-```
-
-But got the following error
-```
----------------------------------------------------------------------------
-c:\users\user\appdata\local\programs\python\python39\lib\site-packages\pyfatfs\FatIO.py in read(self, size)
-    149                 break
-    150
---> 151         self.seek(read_bytes, 1)
-    152
-    153         chunks = b"".join(chunks)
-
-c:\users\user\appdata\local\programs\python\python39\lib\site-packages\pyfatfs\FatIO.py in seek(self, offset, whence)
-     80         prev_index = self.__cindex
-     81
----> 82         self.__cindex = offset // self.fs.bytes_per_cluster
-     83         self.__coffpos = offset % self.fs.bytes_per_cluster
-     84         self.__bpos = offset
-
-ZeroDivisionError: integer division or modulo by zero
-```
-
-```self.fs.bytes_per_cluster``` is 0, weird. Probably running  ```_parse_fat``` is required after all.
-Guess we have to handle this ```FREE_CLUSTER mark``` error somehow, further inspection of the traceback shows that the culprit function is ```get_cluster_chain```, lets see what happens it when we comment ```_parse_fat```
-Adding a print for ```first_cluster``` and ```len(self.fat)``` before the while loop, should be enough.
-
-Without ```_parse_fat``` commented out, the value of ```first_cluster``` is 12315, and ```len(self.fat)``` is 32768.
-Commenting out ```_parse_fat``` changed the values to 12315 for ```first_cluster``` (same value), and ```len(self.fat)``` is now 0, which means the code doesn't even enter into the while loop.
-
-Because commenting out, does succeed in parsing the dirlist, i would keep it that way, leaving us with  ```self.fs.bytes_per_cluster=0```, to fix that, lets look at ```_parse_fat``` and see how it parses ```bytes_per_cluster``` and just comment the rest.
-
-Looking at the code, shows that at first the function read quite a lot of data (which we changed to reading null byets), and then goes into this big and scary while loop, so i commented it out.
-
-Leaving us with the following error 
-```
----------------------------------------------------------------------------
-RuntimeError                              Traceback (most recent call last)
-~\Desktop\DownUnder\ipfs\use_pyfatfs.py in <module>
-      3
-      4 flag_file = my_fs.openbin("07 flag.txt")
-----> 5 print(flag_file.read())
-      6
-      7 # cluster_chain = []
-
-c:\users\user\appdata\local\programs\python\python39\lib\site-packages\pyfatfs\FatIO.py in read(self, size)
-    154         chunks = b"".join(chunks)
-    155         if len(chunks) != size:
---> 156             raise RuntimeError("Read a different amount of data "
-    157                                "than was requested.")
-    158         return chunks
-
-RuntimeError: Read a different amount of data than was requested.
-```
-
-Well, the read fails, upen further inspection into the code of ```FatIO::read```, the number of chunks read does not match the size requested, using some more print statements, the size requested is 50 bytes, but ```len(chunks)``` is 0.
-```chunks``` is appended to inside the for loop, which looks like so ```for c in self.fs.get_cluster_chain(self.__cpos)```
-```get_cluster_chain``` returns a generator, so printing it doesn't really give us much, but adding a print inside the loop will show us that the code inside the loop doesn't run once !
-We probably broke ```get_cluster_chain``` somehow, so let's try and fix it.
-
-### Getting flag cluster
-Messing around with ```flag_file``` object can also give us the cluster in which the flag is located - 12314, using this code snippet
-```python
-flag_file.dir_entry.get_cluster()
-```
-
-### Fixing ```get_cluster_chain```
-```get_cluster_chain``` has a loop which probably iterates over the requested clusters, ```i``` equals the first cluster, is used as index in ```self.fat``` and then changed every iteration.
-But we broke ```self.fat``` by injecting it with null bytes...
-Lets fix it then, instead of inserting a lot of null bytes, i would like it to be all null bytes, except the bytes the parser requested, so i uncommented the big while loop in ```_parse_fat``` and changed the small for loop to look like so
-```python
-for i in range(self.bpb_header["BPB_NumFATS"]):
-	with self.__lock:
-		self.__seek(first_fat_bytes + (i * fat_size))
-		
-		flag_cluster = 12314
-		temp_fat = b'\x00' * flag_cluster
-		self.__seek(first_fat_bytes + (i * fat_size) + flag_cluster)
-		temp_fat += self.__fp.read(0x100)
-		temp_fat += (fat_size - len(temp_fat)) * b'\x00'
-		fats += [temp_fat,]
-```
-
-But we still get the same error :(
-Maybe the index is off ? I would like to inspect what is ```self.fat``` inside the ```get_cluster_chain``` function, so i used ```ipdb``` to do that
-```python
-i = first_cluster
-print(first_cluster)
-print(len(self.fat))
-import ipdb
-ipdb.set_trace()
-while i <= len(self.fat):
-	...
-```
-
-```
-> c:\users\user\appdata\local\programs\python\python39\lib\site-packages\pyfatfs\pyfat.py(819)get_cluster_chain()
-    818         ipdb.set_trace()
---> 819         while i <= len(self.fat):
-    820             if min_data_cluster <= self.fat[i] <= max_data_cluster:
-
-ipdb> len(self.fat)
-32768
-```
-
-Weird, that is example half of ```fat_size```, i guess it probably has something 
 
