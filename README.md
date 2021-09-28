@@ -1,4 +1,9 @@
 # i-pee fs
+## TL;DR
+A file server that given index, will return value at that address. The data can't be mined because the file is too big and the server throttles.
+
+The file is a FAT16 File system image, so i took a python FAT16 parser and modified it to perform reads from the remote server and not from a local file.
+
 ## What we got
 Seems like an interesting challenge, we are given some source code and and UDP (???) ip port to connect to, let's see whats up.
 
